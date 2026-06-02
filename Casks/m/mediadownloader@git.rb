@@ -19,7 +19,7 @@ cask "mediadownloader@git" do
   end
 
   conflicts_with cask: "mediadownloader"
-  depends_on :macos
+  depends_on macos: :sonoma
 
   app "MediaDownloader.app"
 
