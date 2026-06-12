@@ -5,7 +5,11 @@ on:
     branches:
       - main
       - master
+    paths:
+      - 'Casks/**'
   pull_request:
+    paths:
+      - 'Casks/**'
   merge_group:
   workflow_dispatch:
     inputs:
@@ -24,20 +28,19 @@ on:
         type: boolean
 
 env:
-  HOMEBREW_NO_REQUIRE_TAP_TRUST: 1
   HOMEBREW_DEVELOPER: 1
   HOMEBREW_NO_ANALYTICS: 1
   HOMEBREW_NO_AUTO_UPDATE: 1
   HOMEBREW_NO_INSTALL_FROM_API: 1
   HOMEBREW_GITHUB_API_TOKEN: ${{ github.token }}
 
-defaults:
-  run:
-    shell: bash -xeuo pipefail {0}
-
 concurrency:
   group: "${{ github.ref }}"
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash -xeuo pipefail {0}
 
 permissions:
   contents: read
@@ -46,7 +49,7 @@ jobs:
   generate-matrix:
     outputs:
       matrix: ${{ steps.generate-matrix.outputs.matrix }}
-    runs-on: macos-latest
+    runs-on: macos-26
     steps:
       - name: Set up Homebrew
         id: set-up-homebrew
@@ -62,7 +65,10 @@ jobs:
           persist-credentials: false
 
       - name: Run brew config
-        run: brew config
+        run: |
+          brew config
+          cp /Users/runner/work/homebrew-casks/homebrew-casks/.github/workflows/files/generate-cask-ci-matrix /opt/homebrew/Library/Homebrew/dev-cmd/generate-cask-ci-matrix.rb
+          cp /Users/runner/work/homebrew-casks/homebrew-casks/.github/workflows/files/generate-cask-ci-matrix_spec /opt/homebrew/Library/Homebrew/test/dev-cmd/generate-cask-ci-matrix_spec.rb
 
       - name: Generate CI matrix
         id: generate-matrix
@@ -73,12 +79,12 @@ jobs:
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]
           then
             # shellcheck disable=SC2086 # $INPUT_CASKS is a space-separated list of cask tokens
-            brew generate-cask-ci-matrix ${{ github.event.inputs.skip_install && '--skip-install' }} ${{ github.event.inputs.new_cask && '--new' }} --casks $INPUT_CASKS
+            brew generate-cask-ci-matrix --debug --verbose ${{ github.event.inputs.skip_install && '--skip-install' }} ${{ github.event.inputs.new_cask && '--new' }} --casks $INPUT_CASKS
           elif [[ "${GITHUB_EVENT_NAME}" == "push" || "${GITHUB_EVENT_NAME}" == "merge_group" ]]
           then
             brew generate-cask-ci-matrix --syntax-only
           else
-            brew generate-cask-ci-matrix --url "$PULL_REQUEST_URL"
+            brew generate-cask-ci-matrix --debug --verbose --url "$PULL_REQUEST_URL"
           fi
 
   test:
@@ -104,14 +110,8 @@ jobs:
           echo 'HOMEBREW_VERBOSE=1' >> "${GITHUB_ENV}"
         if: runner.debug
 
-      - name: Check out Pull Request
-        uses: actions/checkout@main
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
       - name: Clean up CI machine
-        if: runner.os == 'macOS'
+        # if: runner.os == 'macOS'
         run: brew test-bot --cleanup --only-cleanup-before
 
       - name: Cache Homebrew Gems
@@ -130,13 +130,21 @@ jobs:
           key: macos-style-cache-${{ github.sha }}
           restore-keys: macos-style-cache-
 
+      - name: Check out Pull Request
+        uses: actions/checkout@main
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
       - name: Run brew config
         run: brew config
 
       - name: Run brew test-bot --only-tap-syntax
         id: tap-syntax
-        run: brew test-bot --tap '${{ matrix.tap }}' --only-tap-syntax
         if: always() && !matrix.cask
+        run: |
+          [[ -d $(brew --repository homebrew/core) ]] && brew untap --force homebrew/core
+          brew test-bot --tap '${{ matrix.tap }}' --only-tap-syntax
 
       - name: Run brew fetch --cask ${{ matrix.cask.token }}
         id: fetch
@@ -148,28 +156,22 @@ jobs:
           contains(fromJSON('["success", "skipped"]'), steps.tap-syntax.outcome) &&
           matrix.cask
 
-      - name: Perform search and replace in Bash
-        id: audit-args
-        env:
-          MATRIX_AUDIT_ARGS: ${{ join(matrix.audit_args, ' ') }}
-        run: |
-          modified_audit_args="${MATRIX_AUDIT_ARGS//signing/no-signing}"
-          echo "${modified_audit_args}"
-          echo "new_audit_args=${modified_audit_args}" >> "${GITHUB_OUTPUT}"
-
       - name: Run brew audit --cask${{ (matrix.cask && ' ') || ' --tap ' }}${{ matrix.cask.token || matrix.tap }}
         id: audit
         run: |
-          if [[ "${{ runner.os }}" == "macOS" && "${{ runner.arch }}" == "X64" ]]
+          if [[ ${{ runner.os }} == "macOS" && ${{ runner.arch }} == "X64" ]]
           then
+            LC_ALL=C LANG=C sed -i '' 's/add_error signing_failure_message/# add_error signing_failure_message/g' "$(brew --prefix)/Homebrew/Library/Homebrew/cask/audit.rb"
             LC_ALL=C LANG=C sed -i '' 's/return "#{notability_prefix}/"#{notability_prefix}/g' "$(brew --prefix)/Homebrew/Library/Homebrew/utils/shared_audits.rb"
             LC_ALL=C LANG=C sed -i '' 's/return "#{tag} is a GitHub pre-release."/#return "#{tag} is a GitHub pre-release."/g' "$(brew --prefix)/Homebrew/Library/Homebrew/utils/shared_audits.rb"
-          elif [[ "${{ runner.os }}" == "macOS" && "${{ runner.arch }}" == "ARM64" ]]
+          elif [[ ${{ runner.os }} == "macOS" && ${{ runner.arch }} == "ARM64" ]]
           then
+            LC_ALL=C LANG=C sed -i '' 's/add_error signing_failure_message/# add_error signing_failure_message/g' /opt/homebrew/Library/Homebrew/cask/audit.rb
             LC_ALL=C LANG=C sed -i '' 's/return "#{notability_prefix}/"#{notability_prefix}/g' /opt/homebrew/Library/Homebrew/utils/shared_audits.rb
             LC_ALL=C LANG=C sed -i '' 's/return "#{tag} is a GitHub pre-release."/#return "#{tag} is a GitHub pre-release."/g' /opt/homebrew/Library/Homebrew/utils/shared_audits.rb
           fi
-          brew audit --cask ${{ steps.audit-args.outputs.new_audit_args }}${{ (matrix.cask && ' otsge/casks/') || ' --tap ' }}${{ matrix.cask.token || matrix.tap }}
+          [[ -d $(brew --repository homebrew/core) ]] && brew untap --force homebrew/core
+          brew audit --cask ${{ join(matrix.audit_args, ' ') }}${{ (matrix.cask && ' $GITHUB_REPOSITORY/') || ' --tap ' }}${{ matrix.cask.token || matrix.tap }}
         timeout-minutes: 30
         if: >
           always() &&
